@@ -14,7 +14,7 @@ derived from the token transfers inside the call by a rule stated in §4.
 
 The analyses this dataset must support, chosen by the user:
 
-1. Volume and flow per venue, pool and pair.
+1. Volume and flow per venue, pool, pair and wallet.
 2. LP position lifecycle and fee earnings.
 3. Router and frontend attribution of swaps.
 
@@ -150,8 +150,8 @@ program at the top of a venue call is recorded, known router or not.
 
 1. A tier 1 table's columns are the IDL event's fields, with the IDL's names and types.
    Nothing is renamed, merged, dropped or computed.
-2. A fixed seven-column envelope says where the row came from. It is identical on every
-   table.
+2. A fixed eight-column envelope says where the row came from and who traded. It is
+   identical on every table.
 3. A column exists only if one of the three analyses in §1 needs it.
 4. Amounts are integers in base units. No floats anywhere.
 
@@ -166,8 +166,34 @@ program at the top of a venue call is recorded, known router or not.
 | `ix_path` | VARCHAR, e.g. `4.7` | which instruction produced the row; one transaction with four hops gives four rows |
 | `event_ordinal` | USMALLINT | order among events of the same type from one instruction |
 | `outer_program` | VARCHAR, null | the program of the top-level instruction when it differs from the venue: router or frontend attribution (analysis 3). Null for direct calls |
+| `trader` | VARCHAR, null | the wallet that traded through this instruction, by the rule below: wallet analytics (analysis 1). Not the fee payer, which is often a relayer or bot infrastructure |
 
 Row identity is `(signature, ix_path, event_ordinal)`.
+
+### Trader rule
+
+Applied to every venue instruction, tier 1 and tier 2 alike, using the SPL Token,
+Token-2022 and System transfers inside the instruction's CPI subtree and the token
+balance metadata of the block (owner and mint for every token account touched):
+
+1. Net the transfers by token-account owner. The two parties of a swap are the owners
+   that sent exactly one mint and received exactly one other mint.
+2. The **user side** is the party that signed the transaction. If neither party signed
+   (routers such as Jupiter's shared-accounts mode hold tokens in program-owned
+   accounts during the hops), the user side is the party whose token accounts are also
+   used by transfers outside this instruction; the pool's vaults are only ever touched
+   inside it.
+3. `trader` is the user-side owner when it signed. Otherwise it is the single signer
+   whose transaction-level token balances changed. If there is no such signer, or more
+   than one, `trader` is null.
+
+Instructions with no transfers in their subtree (position creation, claims that go to a
+third party, administrative events) get `trader` null; their IDL fields carry `owner`
+where the program defines one.
+
+Verified on October 16, 2026 against 82 Jupiter-routed hops in live blocks: 79 resolved
+at step 2 by signature, 3 by the outside-use rule with the trader found at step 3, none
+unresolved. The fee payer was the trader in most but not all of them.
 
 ### Tier 1: `events/<program>/<Event>`
 
@@ -208,6 +234,7 @@ tx_index         683
 ix_path          4.7
 event_ordinal    0
 outer_program    JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4
+trader           NALUxTJsozrScVNzRWy9LAg2xoC37RXNNZyyem76kmc
 --- IDL fields ---
 lb_pair          G7ixPyiyNeggVf1VanSetFMNbVuVCPtimJmd9axfQqng
 from             NALUxTJsozrScVNzRWy9LAg2xoC37RXNNZyyem76kmc
@@ -234,19 +261,15 @@ plus:
 | Column | Type | Needed for |
 | --- | --- | --- |
 | `program` | VARCHAR | the venue (analysis 1) |
-| `trader` | VARCHAR | flow per wallet (analysis 1) |
-| `mint_in`, `amount_in` | VARCHAR, UBIGINT | what the trader gave (analysis 1) |
-| `mint_out`, `amount_out` | VARCHAR, UBIGINT | what the trader received (analysis 1) |
+| `mint_in`, `amount_in` | VARCHAR, UBIGINT | what the user side gave (analysis 1) |
+| `mint_out`, `amount_out` | VARCHAR, UBIGINT | what the user side received (analysis 1) |
 
-**Netting rule.** Inside the venue call's CPI subtree, take every SPL Token and Token-2022
-`Transfer` and `TransferChecked`, and every System `Transfer` (native SOL, mint
-`So11…1112`). Resolve each token account's owner and mint from the block's token balance
-metadata. Sum amounts per (owner, mint) as sent or received. The owner who sent exactly
-one mint and received exactly one different mint is the trader; those two sums are
-`amount_in` and `amount_out`. If no owner fits, or more than one does, the call is not
-recorded as a swap and goes to `decode_failures` with reason `not_a_swap` and the raw
-transfers attached. This is a derivation, the only one in the collector, and it exists
-because proprietary AMMs emit nothing else.
+**Netting rule.** Steps 1 and 2 of the trader rule identify the two parties and the user
+side; `amount_in` and `mint_in` are what the user side sent, `amount_out` and `mint_out`
+what it received. Native SOL legs are System `Transfer`s and use mint `So11…1112`. If
+the call does not net to exactly two parties with one mint each way, it is not recorded
+as a swap and goes to `decode_failures` with reason `not_a_swap` and the raw transfers
+attached. This derivation exists because proprietary AMMs emit nothing else.
 
 Example, a real row from slot 457304346 in `swaps/humidifi`, routed by Titan:
 
@@ -258,13 +281,17 @@ tx_index         <from block>
 ix_path          0.13
 event_ordinal    0
 outer_program    T1TANpTeScyeqVzzgNViGDNrkQ6qHz9KrSBS4aNXvGT
+trader           2qCe3m9K22cGH9UXhaHDafqk47zJLnwA1d13m8j5PBbB
 program          9H6tua7jkLhdm3w8BvgpTn5LZNU7g4ZynDmCiNN3q6Rp
-trader           HyKbc1…
-mint_in          pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn
-amount_in        942027658
-mint_out         EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
-amount_out       4238790
+mint_in          EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+amount_in        4238790
+mint_out         pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn
+amount_out       942027658
 ```
+
+The trader signed the transaction and sent USDC to a HumidiFi inventory account, receiving
+PUMP from another. The inventory accounts' owner did not sign, so step 2 picks the right
+side.
 
 ### Instruction table: `instructions/meteora_dlmm/initialize_position`
 
@@ -302,6 +329,7 @@ erDiagram
         varchar ix_path PK
         usmallint event_ordinal PK
         varchar outer_program "null when direct"
+        varchar trader "null when unresolved"
         any idl_field_1 "verbatim from the IDL"
         any idl_field_n "verbatim from the IDL"
         varchar amm_or_pool_state "only on the 3 events without a pool field"
@@ -314,8 +342,8 @@ erDiagram
         varchar ix_path PK
         usmallint event_ordinal PK "always 0"
         varchar outer_program "null when direct"
+        varchar trader "null when unresolved"
         varchar program "the tier 2 venue"
-        varchar trader
         varchar mint_in
         ubigint amount_in
         varchar mint_out
@@ -329,6 +357,7 @@ erDiagram
         varchar ix_path PK
         usmallint event_ordinal PK "always 0"
         varchar outer_program
+        varchar trader
         varchar position
         varchar lb_pair
         integer lower_bin_id
@@ -360,7 +389,7 @@ erDiagram
 
 | Analysis | Reads | Resolved later, outside the collector |
 | --- | --- | --- |
-| 1. Volume per venue, pool, pair | tier 1 swap events (pool, amounts), tier 2 `swaps` (mints, amounts) | pool to mints for tier 1 pools, by a one-time RPC lookup of each pool account seen; pool accounts persist on chain. Token decimals, by `getMint` for each mint seen |
+| 1. Volume per venue, pool, pair, wallet | tier 1 swap events (pool, amounts), tier 2 `swaps` (mints, amounts), `trader` on every row | pool to mints for tier 1 pools, by a one-time RPC lookup of each pool account seen; pool accounts persist on chain. Token decimals, by `getMint` for each mint seen |
 | 2. LP lifecycle and fees | tier 1 liquidity, position and claim events; `initialize_position` for DLMM ranges; DLMM `end_bin_id` on swaps gives the active-bin path | none |
 | 3. Router and frontend attribution | `outer_program` | labels for program IDs, from `config/routers.json`. Frontends that charge by a plain SOL transfer and use no program of their own are not identified |
 
@@ -458,7 +487,7 @@ flowchart TD
     E --> E1["Program data: log lines, attributed by log nesting"]
     E --> E2["self-CPI event instructions (inner ix, program = venue, data prefix e445a52e51cb9a1d)"]
     E1 & E2 --> DIS{discriminator known and length matches?}
-    DIS -->|yes| BOR["Borsh decode via IDL, add outer_program"] --> ROW["row in events/program/Event"]
+    DIS -->|yes| BOR["Borsh decode via IDL, add outer_program and trader"] --> ROW["row in events/program/Event"]
     DIS -->|no| FAIL[decode_failures]
     I -->|tier 2| X[walk CPI subtree by stackHeight, collect transfers]
     X --> NET{nets to one trader, one mint in, one mint out?}
@@ -477,7 +506,7 @@ flowchart TD
   instructions get a `decode_failures` row with reason `log_truncated`. Self-CPI events
   are unaffected.
 - `outer_program` is the program of the outer instruction `i` when it is not the venue
-  itself.
+  itself. `trader` follows the rule in §4 for every venue instruction.
 
 ### Rate limiting and provider
 
@@ -530,7 +559,9 @@ halve the rate temporarily and back off. The RPC URL is read from `.env`
   asserted per decoder: every tier 1 event type at least once; tier 2 swaps through
   Jupiter and Titan; a Token-2022 `TransferChecked`; a native SOL leg; a self-CPI event
   and a log-emitted event; a log-truncated transaction; a version 1 transaction; a tier 2
-  call that must land in `decode_failures` as `not_a_swap`; the three events that need
+  call that must land in `decode_failures` as `not_a_swap`; a Jupiter shared-accounts
+  route where no hop party signs; a relayer-paid transaction where the fee payer is not
+  the trader; the three events that need
   the added `amm` or `pool_state` column; each DLMM `initialize_position*` variant.
 - Range writer: kill mid-range, assert no registered file and no duplicate rows after
   resume.
