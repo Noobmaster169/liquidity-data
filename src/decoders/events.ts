@@ -9,7 +9,9 @@ import { RAYDIUM_V4, decodeRayLog, ammAccountIndex } from './raydiumV4.ts';
 
 export const EVENT_CPI_PREFIX = 'e445a52e51cb9a1d';
 
-export interface DecodeOutput { rows: Map<string, Row[]>; failures: Row[] }
+export interface DecodeOutput { rows: Map<string, Row[]>; failures: Row[]; stats: Record<string, number> }
+export function newOutput(): DecodeOutput { return { rows: new Map(), failures: [], stats: {} }; }
+export function bump(out: DecodeOutput, key: string): void { out.stats[key] = (out.stats[key] ?? 0) + 1; }
 
 export function pushRow(out: DecodeOutput, table: string, row: Row): void {
   let arr = out.rows.get(table);
@@ -54,7 +56,7 @@ function collect(tx: TxModel, ctx: DecodeContext, parsed: { events: LogEvent[] }
 }
 
 export function decodeTier1(tx: TxModel, ctx: DecodeContext, parsed: { events: LogEvent[]; truncated: boolean }): DecodeOutput {
-  const out: DecodeOutput = { rows: new Map(), failures: [] };
+  const out = newOutput();
   const ordinals = new Map<string, number>();
   const traders = new Map<string, string | null>();
   const traderFor = (path: string) => { if (!traders.has(path)) traders.set(path, resolveTrader(tx, path).trader); return traders.get(path)!; };
