@@ -1299,7 +1299,7 @@ test('DLMM Swap2Evt via self-CPI: envelope + verbatim fields', () => {
   const r = rows[0]!;
   assert.equal(r.signature, '288dkjsD9qvbWaCArFypoRfjfB81a2kbd8qRwx1HJZWhwUVbt7w5LFLqnZvrtNSMs1kMHKp28dgGAs59Sun9dU3F');
   assert.equal(r.slot, 457320276);
-  assert.equal(r.block_time, '2026-10-15 23:26:23');
+  assert.equal(r.block_time, '2026-10-15 17:26:23');
   assert.equal(r.tx_index, 126);
   assert.equal(r.ix_path, '3.1');
   assert.equal(r.event_ordinal, 0);
@@ -1612,7 +1612,7 @@ test('HumidiFi hop under Jupiter becomes one swap row from the user side', () =>
   assert.equal(rows.length, 1);
   assert.deepEqual(rows[0], {
     signature: '15PAuXvXQeAYS3ZSmGiUwb6ubE6HkjUJRQWKk7TBBKvA3Nok19oThKdxP4rTuRwTczF6GUBr97TuG6BUcVCy5B7',
-    slot: 457320309, block_time: '2026-10-15 23:26:30', tx_index: 349, ix_path: '4.5', event_ordinal: 0,
+    slot: 457320309, block_time: '2026-10-15 17:26:30', tx_index: 349, ix_path: '4.5', event_ordinal: 0,
     outer_program: 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', trader: '4B8srvotmWddTZuMt4RrBQrnx1sQj2Z7FaXgLbWvpVdd',
     program: '9H6tua7jkLhdm3w8BvgpTn5LZNU7g4ZynDmCiNN3q6Rp',
     mint_in: 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN', amount_in: '337601850',
@@ -1892,7 +1892,7 @@ function blockOf(names: string[]): RpcBlock {
 test('a synthetic block of fixtures yields the expected tables and a blocks row', () => {
   const b = blockOf(['vote', 'failed_venue_tx', 'jupiter_multihop_dlmm_swap2', 'humidifi_swap', 'dflow_route_with_fee_leg', 'propamm_oracle_update_no_transfers', 'raydium_clmm_swap']);
   const d = decodeBlock(b, 457320276, buildContext());
-  assert.deepEqual(d.tables.get('blocks'), [{ slot: 457320276, block_time: '2026-10-15 23:26:23', status: 'ok' }]);
+  assert.deepEqual(d.tables.get('blocks'), [{ slot: 457320276, block_time: '2026-10-15 17:26:23', status: 'ok' }]);
   assert.equal(d.tables.get('events/meteora_dlmm/Swap2Evt')!.length, 1);
   assert.equal(d.tables.get('swaps/humidifi')!.length, 1);
   assert.ok(d.tables.get('intents')!.length >= 2);
