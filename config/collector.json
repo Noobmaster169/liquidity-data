@@ -1,0 +1,8 @@
+{
+  "rangeSlots": 5000,
+  "dataRoot": "data",
+  "stateRoot": "state",
+  "workers": 0,
+  "tail": { "blocksPerSecond": 3, "concurrency": 4, "tipMargin": 32 },
+  "backfill": { "blocksPerSecond": 10, "concurrency": 8 }
+}
