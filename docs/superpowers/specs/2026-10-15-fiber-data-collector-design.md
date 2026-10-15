@@ -351,10 +351,10 @@ stateDiagram-v2
     [*] --> pending
     pending --> fetching : lane picks range
     fetching --> writing : all slots ok or skipped
-    fetching --> pending : crash or provider outage (tmp files deleted on restart)
-    writing --> committed : files renamed and checkpoint row written in one transaction
+    fetching --> pending : crash or provider outage, tmp files deleted on restart
+    writing --> committed : files renamed, checkpoint row written in one transaction
     writing --> pending : crash before commit
-    committed --> replaced : range re-run (decoder upgrade); old files removed after new commit
+    committed --> replaced : range re-run after decoder upgrade, old files removed after new commit
 ```
 
 - `tail` records its start slot once, then follows finalized slots forward.
@@ -370,21 +370,21 @@ stateDiagram-v2
 ```mermaid
 flowchart TD
     B[block JSON] --> T{for each transaction}
-    T -->|vote or meta.err| DROP[drop]
+    T -->|"vote or meta.err"| DROP[drop]
     T -->|ok| P[collect programs of all outer + inner instructions]
     P -->|none in registry| DROP
     P -->|hit| K[upsert tokens, token_accounts from balance metadata]
     K --> I{for each venue instruction}
     I -->|tier 1| E[extract events for this ix_path]
-    E --> E1[Program data: log lines attributed by log nesting]
-    E --> E2[self-CPI event instructions: inner ix with program = venue and data prefix e445a52e51cb9a1d]
+    E --> E1["Program data: log lines, attributed by log nesting"]
+    E --> E2["self-CPI event instructions (inner ix, program = venue, data prefix e445a52e51cb9a1d)"]
     E1 & E2 --> DIS{discriminator known?}
     DIS -->|yes| BOR[Borsh decode via IDL] --> ROW[row in events/program/Event]
-    DIS -->|no, or length mismatch| FAIL[decode_failures]
+    DIS -->|"no, or length mismatch"| FAIL[decode_failures]
     BOR -->|error| FAIL
     I -->|tier 2| X[walk CPI subtree by stackHeight]
-    X --> TRF[Token/Token-2022 Transfer, TransferChecked; System Transfer] --> ROW2[rows in transfers/program]
-    I -->|raydium_amm_v4| RAY[ray_log line → Borsh by variant] --> ROW
+    X --> TRF["Token / Token-2022 Transfer and TransferChecked, System Transfer"] --> ROW2[rows in transfers/program]
+    I -->|raydium_amm_v4| RAY["ray_log line, Borsh by variant"] --> ROW
 ```
 
 - Instruction paths: outer index `i`, inner instruction at depth `d` as `i.j.k...`,
