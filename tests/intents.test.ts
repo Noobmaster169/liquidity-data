@@ -35,3 +35,22 @@ test('outer instructions with no transfers or no swap-shaped party are skipped s
   const b = decodeIntents(fixtureTx('manifest_non_swap'), buildContext());
   assert.equal(b.rows.size, 0); assert.equal(b.failures.length, 0);
 });
+
+test('arbitrage cycle: the mint that nets non-zero is the cycle mint and amounts are its gross flows', () => {
+  // humidifi_swap is USDC -> USDT -> JUP -> USDC in one Jupiter route; the trader ends with more USDC
+  const out = decodeIntents(fixtureTx('humidifi_swap'), buildContext());
+  const r = out.rows.get('intents')![0]!;
+  assert.equal(r.kind, 'cycle');
+  assert.equal(r.mint_in, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+  assert.equal(r.mint_out, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+  assert.equal(r.hops, 3);
+  assert.ok(BigInt(String(r.amount_out)) > BigInt(String(r.amount_in)), 'profit is amount_out minus amount_in');
+});
+
+test('relayer-paid transaction: the fee payer is not the trader', () => {
+  const tx = fixtureTx('dflow_route_with_fee_leg');
+  const feePayer = tx.keys[0]!;
+  const r = decodeIntents(tx, buildContext()).rows.get('intents')![0]!;
+  assert.notEqual(r.trader, feePayer);
+  assert.equal(r.trader, '97itvmxTihn33ZJg3adr5hpgCmjdEU92oARk59yNYzv');
+});

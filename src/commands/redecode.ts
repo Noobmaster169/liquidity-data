@@ -22,10 +22,9 @@ export async function redecode(cfg: CollectorConfig, ctx: DecodeContext, flags: 
     const idl = ctx.idls.get(String(r.program));
     if (!idl) { still++; continue; }
     const payload = Buffer.from(String(r.payload), 'base64');
-    // a failed decode stores the bytes after the discriminator; unknown_discriminator stores disc + payload
-    const known = String(r.reason) === 'unknown_discriminator' ? idl.events.get(payload.subarray(0, 8).toString('hex')) : undefined;
-    const body = known ? payload.subarray(8) : payload;
-    const ev = known ?? [...idl.events.values()].find((e) => { try { decodeStruct(e.fields, body, idl.types); return true; } catch { return false; } });
+    // failure payloads for events are discriminator + body
+    const ev = idl.events.get(payload.subarray(0, 8).toString('hex'));
+    const body = payload.subarray(8);
     if (!ev) { still++; continue; }
     try {
       const fields = jsonSafe(decodeStruct(ev.fields, body, idl.types)) as Row;

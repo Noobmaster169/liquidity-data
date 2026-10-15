@@ -1,1 +1,1 @@
-export const DECODER_VERSION = '1.0.0';
+export const DECODER_VERSION = '1.0.1';

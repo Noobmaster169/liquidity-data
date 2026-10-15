@@ -51,9 +51,38 @@ test('null block_time rows go into the date of the nearest timed block in the ra
 test('cleanupTemp removes leftover .tmp and staging files', async () => {
   const root = mkdtempSync(join(tmpdir(), 'fiber-'));
   mkdirSync(join(root, 'blocks/date=2026-10-15'), { recursive: true });
-  mkdirSync(join(root, '.staging'), { recursive: true });
-  writeFileSync(join(root, 'blocks/date=2026-10-15/5-6.parquet.tmp'), 'x');
-  writeFileSync(join(root, '.staging/tail-5-6-blocks-2026-10-15.jsonl'), 'x');
-  assert.equal(await RangeWriter.cleanupTemp(root), 2);
+  mkdirSync(join(root, '.staging/tail'), { recursive: true });
+  writeFileSync(join(root, 'blocks/date=2026-10-15/5-6.parquet.tail.tmp'), 'x');
+  writeFileSync(join(root, '.staging/tail/5-6-blocks-2026-10-15.jsonl'), 'x');
+  assert.equal(await RangeWriter.cleanupTemp(root, 'tail'), 2);
   assert.equal(readdirSync(join(root, 'blocks/date=2026-10-15')).length, 0);
+});
+
+test('temp files are scoped to a lane: cleaning tail leaves backfill staging alone', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fiber-'));
+  mkdirSync(join(root, 'blocks/date=2026-10-15'), { recursive: true });
+  mkdirSync(join(root, '.staging/tail'), { recursive: true });
+  mkdirSync(join(root, '.staging/backfill'), { recursive: true });
+  writeFileSync(join(root, 'blocks/date=2026-10-15/5-6.parquet.tail.tmp'), 'x');
+  writeFileSync(join(root, 'blocks/date=2026-10-15/1-2.parquet.backfill.tmp'), 'x');
+  writeFileSync(join(root, '.staging/tail/a.jsonl'), 'x');
+  writeFileSync(join(root, '.staging/backfill/b.jsonl'), 'x');
+  assert.equal(await RangeWriter.cleanupTemp(root, 'tail'), 2);
+  assert.ok(existsSync(join(root, 'blocks/date=2026-10-15/1-2.parquet.backfill.tmp')));
+  assert.ok(existsSync(join(root, '.staging/backfill/b.jsonl')));
+});
+
+test('a range sink streams rows per block and produces the same files as writeRange', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fiber-'));
+  const ctx = buildContext();
+  const w = new RangeWriter({ dataRoot: root, conn: await openDuck(':memory:'), decoderVersion: '1.0.0', schemaFor: (t) => schemaFor(t, ctx) });
+  const sink = w.openRange('tail', 100, 101);
+  await sink.add(decodeBlock(block(['humidifi_swap'], 1792085183), 100, ctx).tables);
+  await sink.add(decodeBlock(null, 101, ctx).tables);                       // skipped slot, null block_time
+  const files = await sink.finish();
+  const blocksFile = files.find((f) => f.table === 'blocks')!;
+  assert.equal(blocksFile.path, 'blocks/date=2026-10-15/100-101.parquet');
+  assert.equal(blocksFile.rows, 2);
+  assert.equal(files.find((f) => f.table === 'swaps/humidifi')!.rows, 1);
+  assert.ok(!existsSync(join(root, '.staging/tail')) || readdirSync(join(root, '.staging/tail')).length === 0);
 });

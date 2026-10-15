@@ -190,6 +190,6 @@ erDiagram
 
 ## Sizing
 
-Measured on October 16, 2026 by running 60 live blocks through these rules: about
-8 GB per day, 0.7 TB for a 90-day backfill, 44.5M rows per day. The smoke-test figure
-from this machine is recorded in `docs/architecture.md`.
+Measured on October 15, 2026 with one real 500-slot range from this collector: 32 KB per
+slot, about 6.9 GB per day and 620 GB for a 90-day backfill, 684 MB peak memory. Details
+in `docs/architecture.md`.

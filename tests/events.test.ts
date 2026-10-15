@@ -80,3 +80,13 @@ test('log truncation: tier 1 instructions with no event get a log_truncated fail
   const reasons = out.failures.map((f) => f.reason);
   assert.ok(reasons.every((r) => r === 'log_truncated' || String(r).startsWith('decode:') || r === 'unknown_discriminator'));
 });
+
+test('failure rows keep the discriminator in the payload and the instruction log lines', () => {
+  const { out } = run('raydium_clmm_swap');
+  const f = out.failures.find((x) => x.program === 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK')!;
+  const payload = Buffer.from(String(f.payload), 'base64');
+  const disc = payload.subarray(0, 8).toString('hex');
+  assert.ok(buildContext().idls.get('CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK')!.events.has(disc), 'payload starts with the event discriminator');
+  assert.ok(Array.isArray(f.log_lines) && (f.log_lines as string[]).length > 0);
+  assert.ok((f.log_lines as string[]).some((l) => l.startsWith('Program data: ')));
+});

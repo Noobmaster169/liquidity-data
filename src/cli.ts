@@ -10,6 +10,7 @@ import { schemaFor } from './tables.ts';
 import { inlineDecoder, workerDecoder } from './decodePool.ts';
 import { runLane } from './lane.ts';
 import { DECODER_VERSION } from './version.ts';
+import { resolveUntil } from './until.ts';
 import { status } from './commands/status.ts';
 import { verify } from './commands/verify.ts';
 import { redecode } from './commands/redecode.ts';
@@ -26,14 +27,6 @@ function args(argv: string[]): { positional: string[]; flags: Record<string, str
   return { positional, flags };
 }
 
-function resolveUntil(until: string, tipSlot: number): number {
-  if (/^\d+$/.test(until)) return Number(until);
-  const targetMs = Date.parse(until + 'T00:00:00Z');
-  if (Number.isNaN(targetMs)) throw new Error(`--until must be a slot or YYYY-MM-DD, got ${until}`);
-  const secondsBack = Math.max(0, (Date.now() - targetMs) / 1000);
-  return Math.max(0, tipSlot - Math.round(secondsBack / 0.4)); // 400 ms slots; the lane stops at this slot
-}
-
 async function main(): Promise<void> {
   const { positional, flags } = args(process.argv.slice(2));
   const cmd = positional[0];
@@ -46,7 +39,7 @@ async function main(): Promise<void> {
     const { rpcUrl } = loadEnv();
     const laneCfg = cmd === 'tail' ? cfg.tail : cfg.backfill;
     const rpc = new RpcClient(rpcUrl, new RateLimiter(laneCfg.blocksPerSecond));
-    await RangeWriter.cleanupTemp(cfg.dataRoot);
+    await RangeWriter.cleanupTemp(cfg.dataRoot, cmd);
     const checkpoint = await Checkpoint.open(join(cfg.stateRoot, `${cmd}.duckdb`));
     const writer = new RangeWriter({ dataRoot: cfg.dataRoot, conn: await openDuck(':memory:'), decoderVersion: DECODER_VERSION, schemaFor: (t) => schemaFor(t, ctx), idlSha256: [...ctx.idlsByLabel.values()].map((i) => i.sha256.slice(0, 8)).join(',') });
     const decoder = cfg.workers > 0 ? workerDecoder(cfg.workers) : inlineDecoder(ctx);
@@ -58,7 +51,7 @@ async function main(): Promise<void> {
       if (!tailState) throw new Error('start the tail lane once before backfill so the start slot is recorded');
       fromSlot = tailState.startSlot - 1;
       if (!flags.until) throw new Error('backfill needs --until <YYYY-MM-DD|slot> on first start');
-      targetSlot = resolveUntil(flags.until, tailState.startSlot);
+      targetSlot = await resolveUntil(rpc, flags.until, tailState.startSlot);
       log(`backfill from ${fromSlot} down to ${targetSlot}`);
     }
     try {

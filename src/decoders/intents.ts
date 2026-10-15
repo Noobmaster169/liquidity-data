@@ -27,9 +27,14 @@ export function decodeIntents(tx: TxModel, ctx: DecodeContext): DecodeOutput {
     let kind: string, mintIn: string, mintOut: string;
     if (neg.length === 1 && pos.length === 1) { kind = 'swap'; mintIn = neg[0]!; mintOut = pos[0]!; }
     else if (neg.length + pos.length <= 1) {
-      const sent = n.grossSent.get(who);
-      if (!sent || sent.size === 0) { out.failures.push(failureRow(tx, prefix, tx.outerPrograms[i]!, 'not_an_intent', null, [], r.transfers)); continue; }
-      kind = 'cycle'; mintIn = [...sent.entries()].sort((a, b) => (a[1] < b[1] ? 1 : -1))[0]![0]; mintOut = mintIn;
+      // a cycle: the trader ends in the mint it started with. The mint that netted non-zero is the cycle mint;
+      // on an exact break-even, the mint of the trader's earliest transfer in this instruction.
+      const first = core.find((t) => (t.sourceOwner === who || t.destOwner === who) && t.mint !== null);
+      const candidate = neg[0] ?? pos[0] ?? first?.mint ?? null;
+      const recv = candidate ? n.grossRecv.get(who)?.get(candidate) ?? 0n : 0n;
+      const sent = candidate ? n.grossSent.get(who)?.get(candidate) ?? 0n : 0n;
+      if (!candidate || recv === 0n || sent === 0n) { out.failures.push(failureRow(tx, prefix, tx.outerPrograms[i]!, 'not_an_intent', null, [], r.transfers)); continue; }
+      kind = 'cycle'; mintIn = candidate; mintOut = candidate;
     } else { out.failures.push(failureRow(tx, prefix, tx.outerPrograms[i]!, 'not_an_intent', null, [], r.transfers)); continue; }
     const amountIn = n.grossSent.get(who)?.get(mintIn) ?? 0n;
     const amountOut = n.grossRecv.get(who)?.get(mintOut) ?? 0n;

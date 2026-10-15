@@ -1,6 +1,6 @@
 import { decodeStruct, BorshError } from '../borsh.ts';
 import { jsonSafe, type Row } from '../rows.ts';
-import type { LogEvent } from '../logs.ts';
+import { logLinesFor, type LogEvent } from '../logs.ts';
 import { instructionAt, type Transfer, type TxModel } from '../tx.ts';
 import { resolveTrader } from '../trader.ts';
 import { eventTable, tsString } from '../tables.ts';
@@ -36,7 +36,7 @@ export function failureRow(tx: TxModel, path: string, program: string, reason: s
   };
 }
 
-interface Candidate { programId: string; path: string; disc: string; payload: Uint8Array; source: 'cpi' | 'log' }
+interface Candidate { programId: string; path: string; disc: string; payload: Uint8Array; full: Uint8Array; source: 'cpi' | 'log' }
 
 function collect(tx: TxModel, ctx: DecodeContext, parsed: { events: LogEvent[] }): Candidate[] {
   const seen = new Set<string>();
@@ -46,11 +46,11 @@ function collect(tx: TxModel, ctx: DecodeContext, parsed: { events: LogEvent[] }
     if (!ctx.idls.has(ix.programId) || ix.data.length < 16) continue;
     if (Buffer.from(ix.data.subarray(0, 8)).toString('hex') !== EVENT_CPI_PREFIX) continue;
     const parent = ix.path.includes('.') ? ix.path.slice(0, ix.path.lastIndexOf('.')) : ix.path;
-    add({ programId: ix.programId, path: parent, disc: Buffer.from(ix.data.subarray(8, 16)).toString('hex'), payload: ix.data.subarray(16), source: 'cpi' });
+    add({ programId: ix.programId, path: parent, disc: Buffer.from(ix.data.subarray(8, 16)).toString('hex'), payload: ix.data.subarray(16), full: ix.data.subarray(8), source: 'cpi' });
   }
   for (const e of parsed.events) {
     if (e.kind !== 'data' || !ctx.idls.has(e.programId) || e.payload.length < 8) continue;
-    add({ programId: e.programId, path: e.path, disc: Buffer.from(e.payload.subarray(0, 8)).toString('hex'), payload: e.payload.subarray(8), source: 'log' });
+    add({ programId: e.programId, path: e.path, disc: Buffer.from(e.payload.subarray(0, 8)).toString('hex'), payload: e.payload.subarray(8), full: e.payload, source: 'log' });
   }
   return out;
 }
@@ -65,7 +65,7 @@ export function decodeTier1(tx: TxModel, ctx: DecodeContext, parsed: { events: L
   for (const c of collect(tx, ctx, parsed)) {
     const idl = ctx.idls.get(c.programId)!;
     const ev = idl.events.get(c.disc);
-    if (!ev) { out.failures.push(failureRow(tx, c.path, c.programId, 'unknown_discriminator', c.payload, [], null)); continue; }
+    if (!ev) { out.failures.push(failureRow(tx, c.path, c.programId, 'unknown_discriminator', c.full, logLinesFor(tx.logs, c.path), null)); continue; }
     try {
       const fields = jsonSafe(decodeStruct(ev.fields, c.payload, idl.types)) as Row;
       const key = `${c.path}|${ev.name}`;
@@ -80,7 +80,7 @@ export function decodeTier1(tx: TxModel, ctx: DecodeContext, parsed: { events: L
       pathsWithEvents.add(c.path);
     } catch (e) {
       const msg = e instanceof BorshError ? e.message : String(e);
-      out.failures.push(failureRow(tx, c.path, c.programId, `decode:${msg}`.slice(0, 120), c.payload, [], null));
+      out.failures.push(failureRow(tx, c.path, c.programId, `decode:${msg}`.slice(0, 120), c.full, logLinesFor(tx.logs, c.path), null));
     }
   }
 
@@ -93,7 +93,7 @@ export function decodeTier1(tx: TxModel, ctx: DecodeContext, parsed: { events: L
       pushRow(out, eventTable('raydium_amm_v4', variant), row);
       pathsWithEvents.add(e.path);
     } catch (err) {
-      out.failures.push(failureRow(tx, e.path, RAYDIUM_V4, `decode:${err instanceof Error ? err.message : String(err)}`.slice(0, 120), e.payload, [], null));
+      out.failures.push(failureRow(tx, e.path, RAYDIUM_V4, `decode:${err instanceof Error ? err.message : String(err)}`.slice(0, 120), e.payload, logLinesFor(tx.logs, e.path), null));
     }
   }
 
@@ -101,7 +101,7 @@ export function decodeTier1(tx: TxModel, ctx: DecodeContext, parsed: { events: L
     for (const ix of tx.instructions) {
       if (!ctx.registry.tier1.has(ix.programId) || pathsWithEvents.has(ix.path)) continue;
       if (ix.data.length >= 8 && Buffer.from(ix.data.subarray(0, 8)).toString('hex') === EVENT_CPI_PREFIX) continue;
-      out.failures.push(failureRow(tx, ix.path, ix.programId, 'log_truncated', ix.data, [], null));
+      out.failures.push(failureRow(tx, ix.path, ix.programId, 'log_truncated', ix.data, logLinesFor(tx.logs, ix.path), null));
     }
   }
   return out;

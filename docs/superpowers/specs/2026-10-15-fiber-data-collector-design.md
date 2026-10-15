@@ -383,7 +383,7 @@ erDiagram
 | Table | Columns | Needed for |
 | --- | --- | --- |
 | `blocks` | `slot`, `block_time`, `status` (`ok` or `skipped`) | proof that no slot was missed; `verify` reads it |
-| `decode_failures` | `signature`, `slot`, `block_time`, `tx_index`, `ix_path`, `program`, `reason`, `payload` (VARCHAR, base64 of the event or instruction bytes that failed), `log_lines` (VARCHAR[]), `transfers` (LIST of STRUCT source, destination, owner_source, owner_destination, mint, amount) | the only place event bytes, log lines and raw transfers are kept; input to `redecode` |
+| `decode_failures` | `signature`, `slot`, `block_time`, `tx_index`, `ix_path`, `program`, `reason`, `payload` (VARCHAR, base64: for events the 8-byte discriminator followed by the event bytes; for `log_truncated` the instruction data), `log_lines` (VARCHAR[], the failing instruction's own log lines), `transfers` (LIST of STRUCT source, destination, owner_source, owner_destination, mint, amount) | the only place event bytes, log lines and raw transfers are kept; input to `redecode` |
 
 ### Entity diagram
 
@@ -538,11 +538,17 @@ stateDiagram-v2
     committed --> replaced : range re-run after decoder upgrade, old files removed after new commit
 ```
 
-- `tail` records its start slot once, then follows finalized slots forward.
+- `tail` records its start slot once, then follows finalized slots forward. It opens a range
+  only when a full `rangeSlots` of finalized slots is available (about 33 minutes of chain
+  time at the default), so file sizes stay uniform; a partial range would mean one Parquet
+  file per table every few slots.
 - `backfill` starts at that start slot and walks backward to `target_slot` (configured
   as a date, resolved to a slot once and stored).
-- A range is never partially visible: files are written as `*.tmp`, synced, renamed,
-  then recorded. Nothing is appended to an existing file.
+- A range is never partially visible: files are written as `*.<lane>.tmp`, synced, renamed,
+  then recorded. Nothing is appended to an existing file. Staging and temporary files are
+  scoped to their lane, so a restarting lane never deletes the other lane's in-flight files.
+- Rows are streamed to per-table staging files as each block is decoded; a range is never
+  held in memory (measured peak 0.7 GB for a 500-slot range).
 - A slot is `skipped` only on the RPC's skipped-slot error codes. Any other failure
   retries; a range cannot commit with an unaccounted slot.
 
@@ -602,7 +608,7 @@ halve the rate temporarily and back off. The RPC URL is read from `.env`
 | Command | Does |
 | --- | --- |
 | `fiber-data tail` | run the tail lane |
-| `fiber-data backfill --until 2026-07-17` | run the backfill lane to that date |
+| `fiber-data backfill --until 2026-07-17` | run the backfill lane down to the first slot at or after that UTC date, found by binary search on block times |
 | `fiber-data status` | cursors, ranges committed, rows per table, bytes per day |
 | `fiber-data verify [--lane] [--from --to]` | slot coverage, file checksums, metadata |
 | `fiber-data redecode --from --to` | re-run decoders on `decode_failures` rows |
@@ -626,7 +632,8 @@ halve the rate temporarily and back off. The RPC URL is read from `.env`
 
 | Failure | Handling |
 | --- | --- |
-| RPC 429, timeout, 5xx | retry with exponential backoff, rate halves temporarily; range stays open |
+| RPC 429, timeout, 5xx | retry with exponential backoff; the limiter halves its rate and doubles back every 30 s of calm; range stays open |
+| `getBlock` returns `null` (block not available on this node) | retried like -32004; never recorded as skipped |
 | Skipped slot (-32007, -32009) | `blocks.status = skipped`; counts as accounted |
 | Block not yet available (-32004) on tail | wait and retry; tail stays a small margin below the finalized tip |
 | Borsh decode error, unknown discriminator, length mismatch | `decode_failures` row; range continues |

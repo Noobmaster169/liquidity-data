@@ -73,3 +73,27 @@ test('backfill walks backward from fromSlot to targetSlot', async () => {
   assert.equal((await checkpoint.getState('backfill'))?.nextSlot, 89);
   await checkpoint.close();
 });
+
+test('tail waits for a full range instead of committing a partial one', async () => {
+  const { ctx, checkpoint, writer } = await setup();
+  const blocks = new Map<number, RpcBlock | 'skipped'>([[100, blk([], 1)], [101, blk([], 2)]]);
+  let sleeps = 0;
+  const sleep = async () => { sleeps++; if (sleeps >= 2) throw new Error('stop'); };
+  // tip 134 - margin 32 = 102 available slots 100..102 = 3 < rangeSlots 5 -> must wait, not commit
+  await assert.rejects(() => runLane({ lane: 'tail', rpc: fakeRpc(134, blocks), checkpoint, writer, decoder: inlineDecoder(ctx), rangeSlots: 5, concurrency: 2, decoderVersion: '1.0.0', tipMargin: 32, fromSlot: 100, sleep }), /stop/);
+  assert.equal((await checkpoint.listRanges('tail')).length, 0);
+  await checkpoint.close();
+});
+
+test('worker decoder produces the same rows as the inline decoder', async () => {
+  const { ctx } = await setup();
+  const { workerDecoder } = await import('../src/decodePool.ts');
+  const w = workerDecoder(1);
+  try {
+    const b = blk(['humidifi_swap', 'jupiter_multihop_dlmm_swap2'], 1792085183);
+    const a = await inlineDecoder(ctx).decode(b, 7);
+    const c = await w.decode(b, 7);
+    assert.deepEqual([...c.tables.keys()].sort(), [...a.tables.keys()].sort());
+    assert.deepEqual(c.tables.get('swaps/humidifi'), a.tables.get('swaps/humidifi'));
+  } finally { await w.close(); }
+});

@@ -155,13 +155,20 @@ Recorded after Task 12 of the implementation plan; see the section at the end of
 
 ### Smoke test record, October 15, 2026 (this machine)
 
-`rangeSlots` temporarily 50, `tail --max-ranges 2` against a Helius mainnet endpoint:
+Two runs against a Helius mainnet endpoint, decoder version 1.0.1.
 
-| Check | Result |
+Run 1, `rangeSlots` 50, `tail --max-ranges 2`: `registry check` found all 109 tier 1 and
+tier 2 programs executable on-chain; two ranges committed; `verify` 0 problems.
+
+Run 2, one realistic range: `rangeSlots` 500, `tipMargin` 1000 (so the range was available
+at once), 10 blocks/s, concurrency 8, inline decoding:
+
+| Measure | Result |
 | --- | --- |
-| `registry check` | all 109 tier 1 and tier 2 programs executable on-chain |
-| `tail` | ranges 457347620–457347621 and 457347622–457347628 committed in 4.5 s wall time; 10,743 transactions seen, 1,242 touched a venue, 83 Parquet files |
-| `verify --lane tail` | 2 ranges, 83 files, 0 problems |
-| `intents` | 790 rows: 744 `swap`, 46 `cycle` |
-| `decode_failures` | 70 rows: 40 Raydium CLMM `SwapEvent` length mismatches (16 bytes left after 12 fields: the deployed layout has grown past the vendored IDL, spec §10), 30 `not_an_intent` |
-| size | 1.3 MB for 9 slots, which is per-file overhead at this range size (83 files for 9 slots); bytes per slot must be measured with the production 5,000-slot range before relying on it |
+| range | 457353391–457353890, 554,516 transactions, 60,950 touching a venue |
+| wall time | 4 min 14 s (RPC-bound; decode is about 40 ms per block) |
+| peak memory | 684 MB resident, rows streamed to staging as blocks complete |
+| files | 117 Parquet files, `verify` 0 problems |
+| rows | 34,598 intents (33,489 `swap`, 1,109 `cycle`, trader resolved on 99.9%), 10,988 + 10,769 PumpSwap sell/buy events, 7,972 pump.fun trades, 5,651 DAMM v2 swaps |
+| failures | 2,843 `not_an_intent` (flash-loan wrappers touching four mints, PDA-signed bot flows where no party signs, multi-output routes: the rule as written), 2,637 Raydium CLMM `SwapEvent` length mismatches (deployed layout is 16 bytes longer than the vendored IDL, spec §10), 87 `log_truncated`, 32 `not_a_swap` |
+| size | 16.0 MB for 500 slots = 32 KB per slot, about 6.9 GB per day and 620 GB per 90 days |
