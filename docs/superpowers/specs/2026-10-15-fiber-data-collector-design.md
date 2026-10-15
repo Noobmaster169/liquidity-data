@@ -29,6 +29,7 @@ The analyses this dataset must support, chosen by the user:
 | Storage | Parquet files partitioned by UTC day, queried with DuckDB |
 | Tier 1 data model | One table per (program, event type), columns copied from the IDL |
 | Tier 2 data model | One swap row per venue call, netted from token transfers |
+| Intent level | One `intents` row per top-level instruction containing venue calls, for wallet analytics |
 | Failed transactions | Dropped; nothing executed |
 | Language | TypeScript on Node 24, IDL-driven decoding |
 
@@ -51,6 +52,7 @@ flowchart LR
         EV["events/&lt;program&gt;/&lt;Event&gt;/date=.../"]
         SW["swaps/&lt;program&gt;/date=.../"]
         INS["instructions/meteora_dlmm/initialize_position/date=.../"]
+        INT["intents/date=.../"]
         COV["blocks/, decode_failures/"]
     end
     Q["analysis: DuckDB SQL, pandas, Polars"]
@@ -58,9 +60,9 @@ flowchart LR
     TAIL --> FETCH
     BACK --> FETCH
     RPC --> FETCH --> FILTER --> DEC --> WRITE
-    WRITE --> EV & SW & INS & COV
+    WRITE --> EV & SW & INS & INT & COV
     WRITE --> CKPT
-    EV & SW & INS & COV --> Q
+    EV & SW & INS & INT & COV --> Q
 ```
 
 ### Components
@@ -173,8 +175,13 @@ Row identity is `(signature, ix_path, event_ordinal)`.
 ### Trader rule
 
 Applied to every venue instruction, tier 1 and tier 2 alike, using the SPL Token,
-Token-2022 and System transfers inside the instruction's CPI subtree and the token
-balance metadata of the block (owner and mint for every token account touched):
+Token-2022 and System transfers inside the instruction's CPI subtree. Each token
+account's owner and mint come from, in order: the block's token balance metadata; the
+`InitializeAccount*` or associated-token-account creation instruction in the same
+transaction (wrapped-SOL accounts created and closed inside a transaction never appear in
+balance metadata); the transfer's own authority account. A venue instruction with no
+transfers in its subtree (proprietary AMMs post on-chain price updates many times per
+block this way) is neither a swap nor an intent and produces no row and no failure.
 
 1. Net the transfers by token-account owner. The two parties of a swap are the owners
    that sent exactly one mint and received exactly one other mint.
@@ -264,12 +271,15 @@ plus:
 | `mint_in`, `amount_in` | VARCHAR, UBIGINT | what the user side gave (analysis 1) |
 | `mint_out`, `amount_out` | VARCHAR, UBIGINT | what the user side received (analysis 1) |
 
-**Netting rule.** Steps 1 and 2 of the trader rule identify the two parties and the user
+**Netting rule.** Steps 1 and 2 of the trader rule identify the parties and the user
 side; `amount_in` and `mint_in` are what the user side sent, `amount_out` and `mint_out`
-what it received. Native SOL legs are System `Transfer`s and use mint `So11…1112`. If
-the call does not net to exactly two parties with one mint each way, it is not recorded
-as a swap and goes to `decode_failures` with reason `not_a_swap` and the raw transfers
-attached. This derivation exists because proprietary AMMs emit nothing else.
+what it received. Native SOL legs are System `Transfer`s and use mint `So11…1112`. The
+pool side may be one owner or several (some venues keep one vault authority per mint);
+only the user side must net to one mint each way. A call whose transfers contain no
+swap-shaped party (order placement on a CLOB, a fee payment) is not a swap and is
+skipped silently. A call with a swap-shaped party but no resolvable user side goes to
+`decode_failures` with reason `not_a_swap` and the raw transfers attached. This
+derivation exists because proprietary AMMs emit nothing else.
 
 Example, a real row from slot 457304346 in `swaps/humidifi`, routed by Titan:
 
@@ -302,6 +312,70 @@ instruction table. Rows come from `initialize_position`, `initialize_position2`,
 IDL-named accounts `position` and `lb_pair`, and the IDL arguments `lower_bin_id` (INTEGER)
 and `width` (INTEGER). The variant's extra arguments (`fee_owner`, `lock_release_point`)
 are included for `initialize_position_by_operator` and null otherwise.
+
+### Intent level: `intents`
+
+Every row above is one hop: one venue instruction. A route USDC to SOL to BTC through
+two venues is two rows. Wallet analytics needs the other level, what the trader set out
+to do, and that cannot be rebuilt from hop rows later: tier 1 amounts sit in
+venue-specific fields, routers take fees outside the hops (a measured shared-accounts
+route sent 100 USDC while its hop received 99.8), and the transfer data is not kept. So
+the collector writes one `intents` row per top-level instruction that contains at least
+one venue call. Envelope, with `ix_path` the outer instruction index (e.g. `4`),
+`event_ordinal` 0, `outer_program` null, `trader` by the trader rule applied to the whole
+outer instruction's subtree, plus:
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `program` | VARCHAR | the top-level program: a router, or the venue itself for a direct call |
+| `mint_in`, `amount_in` | VARCHAR, UBIGINT | the mint the trader sent and the gross amount sent inside this instruction |
+| `mint_out`, `amount_out` | VARCHAR, UBIGINT | the mint the trader received and the gross amount received |
+| `hops` | USMALLINT | number of venue rows (events and swaps) under this instruction |
+| `kind` | VARCHAR | `swap` when the mints differ; `cycle` when they are the same mint (arbitrage; profit is `amount_out` minus `amount_in`) |
+
+Identity is `(signature, ix_path)`. The trader's net is taken over the mints the hops
+traded, after removing fee legs: transfers from the trader to an owner that only receives
+in this instruction and is not a party to any hop (router platform fees, frontend fees).
+An outer instruction with no swap-shaped party (only a wrapped-SOL wrap, only fee
+transfers) is not an intent and is skipped silently. One with a swap-shaped party whose
+net still touches more than two mints, or whose trader cannot be resolved, goes to
+`decode_failures` with reason `not_an_intent`. Gross rather than net amounts are what let
+a cycle use the same four columns. Fees paid to third parties are not stored.
+
+An intent at `ix_path = "4"` owns every hop row of the same signature whose `ix_path`
+starts with `4.`, or equals `4` for a direct one-hop call. The four-hop Jupiter route
+above gives one intent row (program Jupiter, kind `cycle`, hops 4) and four hop rows at
+`4.1`, `4.3`, `4.5`, `4.7`.
+
+```mermaid
+erDiagram
+    INTENT ||--o{ EVENT : "signature, outer index of ix_path"
+    INTENT ||--o{ SWAP : "signature, outer index of ix_path"
+    INTENT {
+        varchar signature PK
+        varchar ix_path PK "outer index, e.g. 4"
+        varchar trader
+        varchar program "router or venue"
+        varchar mint_in
+        ubigint amount_in
+        varchar mint_out
+        ubigint amount_out
+        usmallint hops
+        varchar kind "swap or cycle"
+    }
+    EVENT {
+        varchar signature PK
+        varchar ix_path PK "hop, e.g. 4.7"
+        varchar trader
+        varchar outer_program
+    }
+    SWAP {
+        varchar signature PK
+        varchar ix_path PK "hop, e.g. 4.3"
+        varchar trader
+        varchar outer_program
+    }
+```
 
 ### Coverage and failures
 
@@ -389,7 +463,7 @@ erDiagram
 
 | Analysis | Reads | Resolved later, outside the collector |
 | --- | --- | --- |
-| 1. Volume per venue, pool, pair, wallet | tier 1 swap events (pool, amounts), tier 2 `swaps` (mints, amounts), `trader` on every row | pool to mints for tier 1 pools, by a one-time RPC lookup of each pool account seen; pool accounts persist on chain. Token decimals, by `getMint` for each mint seen |
+| 1. Volume per venue, pool, pair, wallet | hop level: tier 1 swap events (pool, amounts), tier 2 `swaps` (mints, amounts). Wallet level: `intents` | pool to mints for tier 1 pools, by a one-time RPC lookup of each pool account seen; pool accounts persist on chain. Token decimals, by `getMint` for each mint seen |
 | 2. LP lifecycle and fees | tier 1 liquidity, position and claim events; `initialize_position` for DLMM ranges; DLMM `end_bin_id` on swaps gives the active-bin path | none |
 | 3. Router and frontend attribution | `outer_program` | labels for program IDs, from `config/routers.json`. Frontends that charge by a plain SOL transfer and use no program of their own are not identified |
 
@@ -408,6 +482,7 @@ data/
   events/pumpswap/BuyEvent/date=2026-10-15/...
   swaps/humidifi/date=2026-10-15/...
   instructions/meteora_dlmm/initialize_position/date=2026-10-15/...
+  intents/date=2026-10-15/...
   blocks/date=2026-10-15/...
   decode_failures/date=2026-10-15/...
 state/tail.duckdb
@@ -492,9 +567,13 @@ flowchart TD
     I -->|tier 2| X[walk CPI subtree by stackHeight, collect transfers]
     X --> NET{nets to one trader, one mint in, one mint out?}
     NET -->|yes| ROW2["row in swaps/program"]
-    NET -->|no| FAIL
+    NET -->|"no swap-shaped party"| DROP
+    NET -->|ambiguous| FAIL
     I -->|raydium_amm_v4| RAY["ray_log line, Borsh by variant, add amm"] --> ROW
     I -->|"dlmm initialize_position*"| ARGS["decode IDL args"] --> ROW3["row in instructions/meteora_dlmm/initialize_position"]
+    P -->|hit| O[for each outer instruction with venue calls] --> NET2{trader net: one mint in, one out, or one cycle mint?}
+    NET2 -->|yes| ROW4["row in intents"]
+    NET2 -->|no| FAIL
 ```
 
 - Instruction paths: outer index `i`; inner instructions get `i.j`, `i.j.k`, … from
@@ -547,7 +626,9 @@ halve the rate temporarily and back off. The RPC URL is read from `.env`
 | Skipped slot (-32007, -32009) | `blocks.status = skipped`; counts as accounted |
 | Block not yet available (-32004) on tail | wait and retry; tail stays a small margin below the finalized tip |
 | Borsh decode error, unknown discriminator, length mismatch | `decode_failures` row; range continues |
-| Tier 2 call that does not net to a swap | `decode_failures` reason `not_a_swap`, transfers attached |
+| Venue instruction or outer instruction with no transfers, or no swap-shaped party | skipped; counted in `status` |
+| Tier 2 call with a swap-shaped party but no resolvable user side | `decode_failures` reason `not_a_swap`, transfers attached |
+| Outer instruction with a swap-shaped party but unresolvable trader or net over more than two mints | `decode_failures` reason `not_an_intent`, transfers attached |
 | Log truncated | `decode_failures` reason `log_truncated` for affected tier 1 instructions |
 | Crash mid-range | tmp files deleted on restart; range redone from checkpoint |
 | Disk full | writer fails before rename; nothing committed; process exits non-zero |
@@ -560,7 +641,8 @@ halve the rate temporarily and back off. The RPC URL is read from `.env`
   Jupiter and Titan; a Token-2022 `TransferChecked`; a native SOL leg; a self-CPI event
   and a log-emitted event; a log-truncated transaction; a version 1 transaction; a tier 2
   call that must land in `decode_failures` as `not_a_swap`; a Jupiter shared-accounts
-  route where no hop party signs; a relayer-paid transaction where the fee payer is not
+  route where no hop party signs, asserting both its hop rows and its intent row
+  including the router fee gap; an arbitrage cycle as an intent of kind `cycle`; a relayer-paid transaction where the fee payer is not
   the trader; the three events that need
   the added `amm` or `pool_state` column; each DLMM `initialize_position*` variant.
 - Range writer: kill mid-range, assert no registered file and no duplicate rows after
@@ -573,11 +655,36 @@ halve the rate temporarily and back off. The RPC URL is read from `.env`
 
 ## 9. Sizing
 
-Measured October 15, 2026 on 30 live blocks: 26% of non-vote transactions invoke a
-registry program, about 32M per day. Estimated output 5–10 GB per day (wide events such
-as PumpSwap `BuyEvent` dominate), under 1 TB per 90 days, to be confirmed by the first
-live run. Backfill of about 19M slots at 10 blocks per second is about 22 days; the bound
-is the RPC plan, not the code.
+Measured October 16, 2026 by running 60 consecutive live mainnet blocks (slots
+457304xxx, about 16:30 UTC) through every rule in this document and writing each table to
+ZSTD-3 Parquet with pyarrow. 114 venue transactions per block.
+
+| Table group | Rows per day | GB per day | GB per 90 days |
+| --- | --- | --- | --- |
+| events/pumpswap | 17.1M | 2.83 | 255 |
+| intents | 13.0M | 1.53 | 138 |
+| swaps (all tier 2) | 2.2M | 0.86 | 78 |
+| events/meteora_dlmm | 3.1M | 0.68 | 61 |
+| events/pumpfun | 4.0M | 0.67 | 61 |
+| events/meteora_damm_v2 | 2.0M | 0.47 | 42 |
+| decode_failures | 1.6M | 0.34 | 31 |
+| events/orca_whirlpool | 0.9M | 0.19 | 18 |
+| events/raydium_* (4 programs) | 0.5M | 0.27 | 24 |
+| blocks | 0.2M | 0.00 | 0.4 |
+| **Total** | **44.5M** | **7.9** | **707** |
+
+Reading the number: the sample is 24 seconds of chain time at a busy hour, so treat it as
+**6–10 GB per day, 0.5–1 TB for the 90-day backfill, and about 3 TB per year of live
+tail**. The per-row cost of the small tables is inflated by per-file overhead in the
+60-block sample (a production file covers 5,000 slots), so the true total is nearer the
+low end. Not in the sample: Meteora DBC events (IDL not yet vendored, 0.6% of volume)
+and Raydium CLMM `SwapEvent` rows that failed on an IDL mismatch (see §10). Rows per
+day for the three analyses: about 27M hop-level swap events plus 2.2M tier 2 swaps, and
+13M intents, of which 94% are `swap` and 6% `cycle`; the trader resolved on 99.8% of
+intents.
+
+Backfill of about 19M slots at 10 blocks per second is about 22 days; the bound is the
+RPC plan, not the code.
 
 ## 10. Open items for the implementation plan
 
@@ -586,4 +693,9 @@ is the RPC plan, not the code.
   discriminators.
 - Confirm the `ray_log` layouts and the `amm` account index per instruction against the
   current raydium-amm source.
+- Pin a Raydium CLMM IDL that matches the deployed program: with the IDL downloaded on
+  October 15, 2026, 152 of 161 `SwapEvent` payloads in the sample failed on length
+  mismatch, so the deployed event layout differs from that file. Same check for
+  LaunchLab `PoolCreateEvent` (2 of 2 failed).
+- Vendor the Meteora DBC IDL from the SDK bundle and confirm its discriminators.
 - Measure actual bytes per day before launching the backfill.
