@@ -104,7 +104,7 @@ and a reason, so exclusions are visible.
 | --- | --- | --- | --- | --- | --- |
 | meteora_dlmm | `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo` | dlmm-sdk `idls/dlmm.json` v0.12.0 | 30 | Swap, Swap2Evt | AddLiquidity, RemoveLiquidity, Rebalancing, PositionCreate, PositionClose, ClaimFee, ClaimFee2, ClaimReward, ClaimReward2 |
 | meteora_damm_v2 | `cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG` | `idls/damm_v2.json` v0.1.5 | 27 | EvtSwap, EvtSwap2 | EvtAddLiquidity, EvtRemoveLiquidity, EvtLiquidityChange, EvtCreatePosition, EvtClosePosition, EvtClaimPositionFee, EvtClaimReward |
-| meteora_dbc | `dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN` | `@meteora-ag/dynamic-bonding-curve-sdk` 2.0.0 bundled IDL | 21 | EvtSwap | none (bonding curve) |
+| meteora_dbc | `dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN` | `@meteora-ag/dynamic-bonding-curve-sdk` 2.0.0 bundled IDL, program v0.2.2 | 29 | EvtSwap, EvtSwap2, EvtSwap3 (+ transfer-hook variants) | none (bonding curve) |
 | orca_whirlpool | `whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc` | `@orca-so/whirlpools-sdk` 0.22.0 `whirlpool.json` | 6 | Traded | LiquidityIncreased, LiquidityDecreased, LiquidityRepositioned, PositionOpened |
 | raydium_clmm | `CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK` | raydium-idl `raydium_clmm.json` | 15 | SwapEvent | IncreaseLiquidityEvent, DecreaseLiquidityEvent, CreatePersonalPositionEvent, CollectPersonalFeeEvent, LiquidityChangeEvent |
 | raydium_cpmm | `CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C` | raydium-idl `raydium_cp_swap.json` v0.2.0 | 2 | SwapEvent | LpChangeEvent |
@@ -222,8 +222,9 @@ Type mapping (Borsh to Parquet, mechanical):
 | `u64` | UBIGINT |
 | `i8`, `i16`, `i32` | INTEGER |
 | `i64` | BIGINT |
-| `u128`, `i128` | HUGEINT |
+| `u128`, `i128` | VARCHAR holding the decimal string. DuckDB writes 128-bit integers to Parquet as DOUBLE, which loses exactness; a decimal string is exact and casts on read with `::UHUGEINT` |
 | `bool` | BOOLEAN |
+| `bytes` | VARCHAR, hex |
 | `string` | VARCHAR |
 | `pubkey` | VARCHAR (base58) |
 | `[T; N]`, `vec<T>` | LIST |
@@ -382,7 +383,7 @@ erDiagram
 | Table | Columns | Needed for |
 | --- | --- | --- |
 | `blocks` | `slot`, `block_time`, `status` (`ok` or `skipped`) | proof that no slot was missed; `verify` reads it |
-| `decode_failures` | `signature`, `slot`, `ix_path`, `program`, `reason`, `ix_data` (BLOB), `log_lines` (LIST), `transfers` (LIST of STRUCT source, destination, owner_source, owner_destination, mint, amount) | the only place instruction bytes, log lines and raw transfers are kept; input to `redecode` |
+| `decode_failures` | `signature`, `slot`, `block_time`, `tx_index`, `ix_path`, `program`, `reason`, `payload` (VARCHAR, base64 of the event or instruction bytes that failed), `log_lines` (VARCHAR[]), `transfers` (LIST of STRUCT source, destination, owner_source, owner_destination, mint, amount) | the only place event bytes, log lines and raw transfers are kept; input to `redecode` |
 
 ### Entity diagram
 
@@ -450,7 +451,7 @@ erDiagram
         varchar ix_path PK
         varchar program
         varchar reason
-        blob ix_data
+        varchar payload "base64"
         list log_lines
         list transfers "raw transfers for not_a_swap"
     }
@@ -581,9 +582,12 @@ flowchart TD
 - Log attribution: `Program X invoke [n]` and `Program X success` lines form a stack; a
   `Program data:` line belongs to the program on top and to the instruction executing
   at that depth.
-- Log truncation (`Log truncated`) loses later log-emitted events; affected tier 1
-  instructions get a `decode_failures` row with reason `log_truncated`. Self-CPI events
-  are unaffected.
+- Some programs (PumpSwap, pump.fun, LaunchLab) emit the same event through both
+  channels. Self-CPI events are taken first; a log event whose path, discriminator and
+  payload bytes equal one already taken is dropped, so each emitted event is one row.
+- Log truncation (`Log truncated`) loses later log-emitted events; every tier 1
+  instruction of such a transaction that yielded no event from either channel gets a
+  `decode_failures` row with reason `log_truncated`. Self-CPI events are unaffected.
 - `outer_program` is the program of the outer instruction `i` when it is not the venue
   itself. `trader` follows the rule in §4 for every venue instruction.
 
@@ -697,5 +701,5 @@ RPC plan, not the code.
   October 15, 2026, 152 of 161 `SwapEvent` payloads in the sample failed on length
   mismatch, so the deployed event layout differs from that file. Same check for
   LaunchLab `PoolCreateEvent` (2 of 2 failed).
-- Vendor the Meteora DBC IDL from the SDK bundle and confirm its discriminators.
+- Confirm the vendored DBC IDL (program v0.2.2, from the SDK bundle) against live `EvtSwap2`/`EvtSwap3` payloads in the first run.
 - Measure actual bytes per day before launching the backfill.
