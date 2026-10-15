@@ -1,0 +1,14 @@
+services:
+  tail:
+    build: .
+    command: ["tail"]
+    env_file: .env
+    volumes: ["./data:/app/data", "./state:/app/state"]
+    restart: unless-stopped
+  backfill:
+    build: .
+    command: ["backfill", "--until", "${BACKFILL_UNTIL:-2026-07-17}"]
+    env_file: .env
+    volumes: ["./data:/app/data", "./state:/app/state"]
+    restart: unless-stopped
+    depends_on: [tail]

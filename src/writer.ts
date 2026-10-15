@@ -8,7 +8,7 @@ import { q, type DuckDBConnection } from './duck.ts';
 
 export interface FileRecord { table: string; path: string; rows: number; sha256: string }
 
-export interface RangeWriterOptions { dataRoot: string; conn: DuckDBConnection; decoderVersion: string; schemaFor: (table: string) => Column[]; idlSha256?: string }
+export interface RangeWriterOptions { dataRoot: string; conn: DuckDBConnection; decoderVersion: string; schemaFor: (table: string) => Column[]; idlSha256?: string; suffix?: string }
 
 async function sha256File(path: string): Promise<string> {
   const h = createHash('sha256');
@@ -22,7 +22,7 @@ export class RangeWriter {
   constructor(opts: RangeWriterOptions) { this.opts = opts; }
 
   async writeRange(lane: string, lo: number, hi: number, tables: Map<string, Row[]>): Promise<FileRecord[]> {
-    const { dataRoot, conn, decoderVersion, schemaFor, idlSha256 = '' } = this.opts;
+    const { dataRoot, conn, decoderVersion, schemaFor, idlSha256 = '', suffix = '' } = this.opts;
     const staging = join(dataRoot, '.staging');
     await mkdir(staging, { recursive: true });
     let fallbackDate: string | null = null;
@@ -46,7 +46,7 @@ export class RangeWriter {
           const stage = join(staging, `${lane}-${lo}-${hi}-${table.replace(/\//g, '__')}-${date}.jsonl`);
           await writeFile(stage, group.map((r) => JSON.stringify(r)).join('\n') + '\n');
           written.push(stage);
-          const rel = `${table}/date=${date}/${lo}-${hi}.parquet`;
+          const rel = `${table}/date=${date}/${lo}-${hi}${suffix}.parquet`;
           const final = join(dataRoot, rel);
           const tmp = final + '.tmp';
           await mkdir(dirname(final), { recursive: true });

@@ -1,0 +1,35 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { verifyLane } from '../src/commands/verify.ts';
+import { Checkpoint } from '../src/checkpoint.ts';
+import { RangeWriter } from '../src/writer.ts';
+import { openDuck } from '../src/duck.ts';
+import { schemaFor } from '../src/tables.ts';
+import { buildContext } from './helpers.ts';
+
+test('verify passes on a consistent lane, flags a changed file and a slot gap', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fiber-verify-'));
+  const ctx = buildContext();
+  const ckpt = await Checkpoint.open(join(root, 'state', 'tail.duckdb'));
+  await ckpt.initState({ lane: 'tail', startSlot: 1, targetSlot: null, nextSlot: 1 });
+  const writer = new RangeWriter({ dataRoot: join(root, 'data'), conn: await openDuck(':memory:'), decoderVersion: '1.0.0', schemaFor: (t) => schemaFor(t, ctx) });
+  const blocks = (lo: number, hi: number) => Array.from({ length: hi - lo + 1 }, (_, i) => ({ slot: lo + i, block_time: '2026-10-15 00:00:00', status: 'ok' }));
+  let files = await writer.writeRange('tail', 1, 3, new Map([['blocks', blocks(1, 3)]]));
+  await ckpt.commitRange('tail', 1, 3, files, '1.0.0', 4);
+  files = await writer.writeRange('tail', 4, 5, new Map([['blocks', blocks(4, 5)]]));
+  await ckpt.commitRange('tail', 4, 5, files, '1.0.0', 6);
+  let r = await verifyLane(join(root, 'data'), ckpt, 'tail');
+  assert.deepEqual(r.problems, []);
+  assert.equal(r.ranges, 2);
+  writeFileSync(join(root, 'data', files[0]!.path), 'corrupt');
+  r = await verifyLane(join(root, 'data'), ckpt, 'tail');
+  assert.ok(r.problems.some((p) => p.includes('sha256')));
+  files = await writer.writeRange('tail', 8, 9, new Map([['blocks', blocks(8, 9)]]));
+  await ckpt.commitRange('tail', 8, 9, files, '1.0.0', 10);
+  r = await verifyLane(join(root, 'data'), ckpt, 'tail');
+  assert.ok(r.problems.some((p) => p.includes('gap')));
+  await ckpt.close();
+});
