@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
   backfill:
     build: .
-    command: ["backfill", "--until", "${BACKFILL_UNTIL:-2026-07-17}"]
+    command: ["backfill", "--until", "${BACKFILL_UNTIL:-90d}"]
     env_file: .env
     volumes: ["./data:/app/data", "./state:/app/state"]
     restart: unless-stopped
