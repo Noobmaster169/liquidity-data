@@ -1,14 +1,11 @@
+# Backfill-only deployment: one lane walks from the finalized tip back BACKFILL_UNTIL and exits when done.
+# To also follow the chain live, add a `tail` service with command ["tail"] and start it before backfill
+# (the backfill then anchors just below the tail's start slot) and lower backfill.blocksPerSecond so the
+# two lanes together stay inside your rate limit.
 services:
-  tail:
-    build: .
-    command: ["tail"]
-    env_file: .env
-    volumes: ["./data:/app/data", "./state:/app/state"]
-    restart: unless-stopped
   backfill:
     build: .
     command: ["backfill", "--until", "${BACKFILL_UNTIL:-90d}"]
     env_file: .env
     volumes: ["./data:/app/data", "./state:/app/state"]
-    restart: unless-stopped
-    depends_on: [tail]
+    restart: on-failure

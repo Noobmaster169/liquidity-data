@@ -16,13 +16,17 @@ On a fresh machine with Docker:
 ```sh
 git clone <this repo> fiber-data && cd fiber-data
 cp .env.example .env      # set SOLANA_RPC_URL (and optionally BACKFILL_UNTIL); .env is never committed
-docker compose up -d      # starts the tail lane, then the backfill lane
+docker compose up -d      # backfill from the finalized tip back BACKFILL_UNTIL days, then exit
 docker compose logs -f    # one line per committed range
 ```
 
 Data lands in `./data`, checkpoints in `./state`; both are bind-mounted into the containers, so
 put the checkout on the disk that has room (see [Rate and credit budget](#rate-and-credit-budget)
-for how much). Everything else is in the repo: IDLs, venue registry, rates.
+for how much). Everything else is in the repo: IDLs, venue registry, rates. The container exits
+with status 0 when the backfill reaches its target; `restart: on-failure` restarts it after an
+RPC outage or exhausted credits, and the checkpoint resumes it from the last committed range.
+The shipped compose file runs the backfill lane only; the live `tail` lane exists and is
+described below for deployments that also want to follow the chain.
 
 For development without Docker:
 
@@ -41,9 +45,9 @@ Node 24 runs the TypeScript directly; there is no build step.
 npm run fiber-data -- registry check              # every registry program must be executable on-chain
 npm run fiber-data -- tail --max-ranges 1          # one range of the live lane, then exit
 npm run fiber-data -- tail                         # follow finalized slots forever
-npm run fiber-data -- backfill --until 90d         # walk backward from the tail's start slot: <N>d, YYYY-MM-DD or a slot
+npm run fiber-data -- backfill --until 90d         # walk backward from the finalized tip (or from below the tail's start if a tail checkpoint exists): <N>d, YYYY-MM-DD or a slot
 npm run fiber-data -- status
-npm run fiber-data -- verify --lane tail
+npm run fiber-data -- verify --lane backfill
 npm run fiber-data -- query --sql "SELECT count(*) FROM events__meteora_dlmm__Swap2Evt"
 docker compose up -d                                # tail + backfill as services
 ```
@@ -55,36 +59,48 @@ Rates, range size, paths and worker count live in `config/collector.json`. Venue
 ## Rate and credit budget
 
 Each lane is its own process with its own token-bucket limiter, so the request rate the provider
-sees is the sum of the lanes. Every `getBlock` is one request; the tail lane adds at most one
-`getSlot` every two seconds while it waits for a full range. `config/collector.json` ships with:
+sees is the sum of the lanes you run. Every `getBlock` is one request; the tail lane adds at most
+one `getSlot` every two seconds while it waits for a full range. `config/collector.json` ships with:
 
 | Lane | blocksPerSecond | concurrency | Purpose |
 |---|---|---|---|
-| tail | 4 | 6 | mainnet produces ~2.5 slots/s; 4 leaves room to catch up after a restart |
-| backfill | 20 | 24 | the rest of a 25 req/s budget (half of a 50 req/s plan) |
+| backfill | 24 | 28 | the whole of a 25 req/s budget (half of a 50 req/s plan) when it runs alone |
+| tail | 4 | 6 | only if you run it: mainnet produces ~2.5 slots/s, 4 leaves room to catch up |
 
-Decoding costs ~40 ms per block, so 24 blocks/s saturates one thread; `workers: 4` moves decoding
-to worker threads. Lower both `blocksPerSecond` values if your plan's rate limit is lower; the
-limiter also halves itself on a 429 and recovers over 30 s windows.
+Running both lanes together means lowering `backfill.blocksPerSecond` so the sum stays inside the
+budget. Decoding costs ~40 ms per block, so 24 blocks/s saturates one thread; `workers: 4` moves
+decoding to worker threads. The limiter also halves itself on a 429 and recovers over 30 s windows.
+
+The limiter is the ceiling, not a promise: a block is ~3 MB of JSON (gzip on the wire, which
+`fetch` negotiates by itself) and costs ~15 ms to parse plus ~40 ms to decode, so a small machine
+is CPU-bound below the limit. Measured on a 4-thread dev laptop with concurrency 28: 9 blocks/s
+(one 5,000-slot range in 9 minutes) against a Helius endpoint answering `getBlock` in 0.3 s alone
+and 0.5 to 0.8 s with 16 in flight. The provider side supports ~35 blocks/s at concurrency 28, so
+a machine with 8 or more cores should reach the configured 24. Running slower than the limit only
+spreads the same credits over more days.
 
 Requests per second is the easy limit. The binding one on metered plans is **credits per month**,
-because mainnet produces about 216,000 slots a day and every slot is one `getBlock`:
+because mainnet produces about 265,000 slots a day (measured: 90 days resolved to 23.9M slots,
+skipped slots included, and a skipped slot still costs the `getBlock` that reports it):
 
 | Work | getBlock calls | At 1 credit each |
 |---|---|---|
-| tail, 30 days | 6.5M | 6.5M credits |
-| backfill, 90 days | 19.4M | 19.4M credits |
-| backfill at 20 blocks/s | 1.73M per day | done in 11 days |
+| backfill, 30 days of history | 8.0M | 8.0M credits |
+| backfill, 90 days of history | 23.9M | 23.9M credits |
+| backfill at 24 blocks/s | 2.07M per day | 90 days done in 11.5 days of wall clock |
+| tail, per 30 days of running | 8.0M | 8.0M credits |
 
-Helius Developer (10M credits, 50 req/s, no autoscaling, as of October 2026) therefore runs this
-pipeline at the shipped rates for about 5 days before the month's credits are gone, and even the
-tail lane alone uses two thirds of them. The tail plus a 90-day backfill needs roughly 26M credits
-in the first month and 6.5M a month after that, which is Business-plan territory (100M credits,
-200 req/s). Check your provider's per-method credit table before starting; `getBlock` is 1 credit
-on Helius but other providers weight it higher.
+On Helius Developer (10M credits a month, 50 req/s, no autoscaling, as of October 2026) a
+backfill-only run collects about 38 days of history per month of credits: at the shipped rate
+it spends the month's credits in under five days, then the provider rejects calls, the container
+exits after its retries and compose restarts it until the credits reset, when it resumes from the
+checkpoint. A 90-day backfill therefore spans three billing cycles on that plan, or finishes in
+twelve days on Business (100M credits, 200 req/s). Running the tail lane as well costs a further
+8M credits a month. Check your provider's per-method credit table before starting; `getBlock`
+is 1 credit on Helius but other providers weight it higher.
 
-Disk: measured at 32 KB per slot of ZSTD Parquet, so ~6.9 GB per day, ~620 GB for 90 days plus
-~210 GB per further month of tail.
+Disk: measured at 19 to 32 KB per slot of ZSTD Parquet on two ranges, so 5 to 8.5 GB per day of
+history, up to ~770 GB for 90 days, plus up to ~250 GB per month if the tail lane runs.
 
 ## Pipeline
 

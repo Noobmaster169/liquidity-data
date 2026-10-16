@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { loadConfig, loadEnv } from './config.ts';
 import { loadRegistry } from './registry.ts';
 import { buildDecodeContext } from './decoders/context.ts';
@@ -8,7 +9,7 @@ import { RangeWriter } from './writer.ts';
 import { openDuck } from './duck.ts';
 import { schemaFor } from './tables.ts';
 import { inlineDecoder, workerDecoder } from './decodePool.ts';
-import { runLane } from './lane.ts';
+import { runLane, backfillAnchor } from './lane.ts';
 import { DECODER_VERSION } from './version.ts';
 import { resolveUntil } from './until.ts';
 import { status } from './commands/status.ts';
@@ -45,14 +46,13 @@ async function main(): Promise<void> {
     const decoder = cfg.workers > 0 ? workerDecoder(cfg.workers) : inlineDecoder(ctx);
     let fromSlot: number | undefined, targetSlot: number | undefined;
     if (cmd === 'backfill' && !(await checkpoint.getState('backfill'))) {
-      const tailCkpt = await Checkpoint.open(join(cfg.stateRoot, 'tail.duckdb'));
-      const tailState = await tailCkpt.getState('tail');
-      await tailCkpt.close();
-      if (!tailState) throw new Error('start the tail lane once before backfill so the start slot is recorded');
-      fromSlot = tailState.startSlot - 1;
-      if (!flags.until) throw new Error('backfill needs --until <YYYY-MM-DD|slot> on first start');
-      targetSlot = await resolveUntil(rpc, flags.until, tailState.startSlot);
-      log(`backfill from ${fromSlot} down to ${targetSlot}`);
+      if (!flags.until) throw new Error('backfill needs --until <N>d|YYYY-MM-DD|slot on first start');
+      const tailPath = join(cfg.stateRoot, 'tail.duckdb');
+      let tailState = null;
+      if (existsSync(tailPath)) { const tailCkpt = await Checkpoint.open(tailPath); tailState = await tailCkpt.getState('tail'); await tailCkpt.close(); }
+      fromSlot = backfillAnchor(tailState, await rpc.getSlot(), cfg.tail.tipMargin);
+      targetSlot = await resolveUntil(rpc, flags.until, fromSlot);
+      log(`backfill from ${fromSlot} (${tailState ? 'below the tail start' : 'finalized tip'}) down to ${targetSlot}`);
     }
     try {
       await runLane({ lane: cmd, rpc, checkpoint, writer, decoder, rangeSlots: cfg.rangeSlots, concurrency: laneCfg.concurrency, decoderVersion: DECODER_VERSION, tipMargin: cfg.tail.tipMargin, fromSlot, targetSlot, maxRanges: flags['max-ranges'] ? Number(flags['max-ranges']) : undefined, log });

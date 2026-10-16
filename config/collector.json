@@ -4,5 +4,5 @@
   "stateRoot": "state",
   "workers": 4,
   "tail": { "blocksPerSecond": 4, "concurrency": 6, "tipMargin": 32 },
-  "backfill": { "blocksPerSecond": 20, "concurrency": 24 }
+  "backfill": { "blocksPerSecond": 24, "concurrency": 28 }
 }

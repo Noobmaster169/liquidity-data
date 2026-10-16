@@ -1,5 +1,5 @@
 import type { RpcClient } from './rpc.ts';
-import type { Checkpoint } from './checkpoint.ts';
+import type { Checkpoint, LaneState } from './checkpoint.ts';
 import type { RangeWriter, FileRecord } from './writer.ts';
 import type { Decoder } from './decodePool.ts';
 
@@ -11,6 +11,15 @@ export interface LaneDeps {
 }
 
 const sleepDefault = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Highest slot the backfill lane walks down from. With a tail checkpoint it is the slot just below the tail's
+ * start, so the two lanes meet with no gap; without one (backfill-only deployments) it is the finalized tip
+ * minus the same safety margin the tail uses.
+ */
+export function backfillAnchor(tailState: LaneState | null, tip: number, tipMargin: number): number {
+  return tailState ? tailState.startSlot - 1 : tip - tipMargin;
+}
 
 async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);

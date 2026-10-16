@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runLane, processRange } from '../src/lane.ts';
+import { runLane, processRange, backfillAnchor } from '../src/lane.ts';
 import { Checkpoint } from '../src/checkpoint.ts';
 import { RangeWriter } from '../src/writer.ts';
 import { openDuck, rowsJson } from '../src/duck.ts';
@@ -96,4 +96,9 @@ test('worker decoder produces the same rows as the inline decoder', async () => 
     assert.deepEqual([...c.tables.keys()].sort(), [...a.tables.keys()].sort());
     assert.deepEqual(c.tables.get('swaps/humidifi'), a.tables.get('swaps/humidifi'));
   } finally { await w.close(); }
+});
+
+test('backfill anchors below the tail start when a tail checkpoint exists, else at the finalized tip minus the margin', () => {
+  assert.equal(backfillAnchor({ lane: 'tail', startSlot: 500, targetSlot: null, nextSlot: 900 }, 1000, 32), 499);
+  assert.equal(backfillAnchor(null, 1000, 32), 968);
 });
